@@ -10,7 +10,9 @@ class ExcelHandler:
 
     # Noms des colonnes
     COL_ENTREPRISE = "Entreprise"
+    COL_LIEU = "lieu"
     COL_CONTACT = "contact"
+    COL_POSTE = "Intitulé de poste"
     COL_DATE_CONTACT = "date de contact"
 
     def __init__(self, filepath: str) -> None:
@@ -22,6 +24,7 @@ class ExcelHandler:
         self.df = pd.read_excel(self.filepath)
         # Convertir en object pour pouvoir y écrire des strings même si tout est NaN
         self.df[self.COL_DATE_CONTACT] = self.df[self.COL_DATE_CONTACT].astype(object)
+        self.df[self.COL_CONTACT] = self.df[self.COL_CONTACT].astype(object)
 
     def save(self) -> None:
         """Sauvegarde le DataFrame dans le fichier Excel."""
@@ -30,6 +33,24 @@ class ExcelHandler:
     def get_pending(self) -> pd.DataFrame:
         """Renvoie les lignes dont la date de contact est vide (non envoyées)."""
         return self.df[self.df[self.COL_DATE_CONTACT].isna()]
+
+    def get_missing_emails(self) -> pd.DataFrame:
+        """Renvoie les lignes sans email de contact (NaN ou vide)."""
+        mask = self.df[self.COL_CONTACT].isna() | (
+            self.df[self.COL_CONTACT].astype(str).str.strip() == ""
+        )
+        return self.df[mask]
+
+    def set_contact_email(self, index: int, email: str) -> None:
+        """Écrit un email de contact dans une ligne donnée."""
+        self.df.at[index, self.COL_CONTACT] = email
+
+    def has_email(self, row: pd.Series) -> bool:
+        """Vérifie si la ligne a un email de contact renseigné."""
+        val = row[self.COL_CONTACT]
+        if pd.isna(val):
+            return False
+        return str(val).strip() != ""
 
     def mark_sent(self, index: int) -> None:
         """Marque une ligne comme envoyée avec la date/heure actuelle."""
@@ -44,3 +65,17 @@ class ExcelHandler:
     def get_contact_email(self, row: pd.Series) -> str:
         """Extrait l'email de contact d'une ligne."""
         return str(row[self.COL_CONTACT])
+
+    def get_location(self, row: pd.Series) -> str:
+        """Extrait le lieu d'une ligne (vide si NaN)."""
+        val = row[self.COL_LIEU]
+        if pd.isna(val):
+            return ""
+        return str(val).strip()
+
+    def get_job_title(self, row: pd.Series) -> str:
+        """Extrait l'intitulé de poste d'une ligne (vide si NaN)."""
+        val = row[self.COL_POSTE]
+        if pd.isna(val):
+            return ""
+        return str(val).strip()
