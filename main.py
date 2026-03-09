@@ -77,16 +77,20 @@ def _find_missing_emails(excel: ExcelHandler, logger: logging.Logger) -> int:
 
         if result and result.score >= min_score:
             excel.set_contact_email(idx, result.email)
-            logger.info(f"  [TROUVÉ] {company} -> {result.email} (score={result.score})")
+            excel.set_score(idx, result.score)
+            # Extraire un éventuel nom depuis les raisons du scoring
+            excel.save()
+            logger.info(
+                f"  [TROUVÉ] {company} -> {result.email} "
+                f"(score={result.score}) — sauvegardé"
+            )
             found_count += 1
         else:
             score_info = f" (score={result.score})" if result else ""
             logger.warning(f"  [NON TROUVÉ] {company}{score_info} — sera ignoré à l'envoi.")
 
-    # Sauvegarder immédiatement les emails trouvés
     if found_count > 0:
-        excel.save()
-        logger.info(f"{found_count} email(s) trouvé(s) et sauvegardé(s) dans le fichier Excel.")
+        logger.info(f"{found_count} email(s) trouvé(s) au total.")
 
     return found_count
 
@@ -147,7 +151,8 @@ def _send_applications(
                         sender.send(email, subject, body)
 
                     excel.mark_sent(idx)
-                    logger.info(f"[OK] {company} <{email}>")
+                    excel.save()
+                    logger.info(f"[OK] {company} <{email}> — sauvegardé")
                     success = True
                     break
                 except Exception as exc:
@@ -197,8 +202,7 @@ def _send_applications(
             except Exception:
                 logger.exception("Erreur lors de la déconnexion SMTP")
 
-    excel.save()
-    logger.info("Fichier Excel mis à jour.")
+    logger.info("Envois terminés.")
 
 
 # ------------------------------------------------------------------

@@ -8,12 +8,14 @@ import pandas as pd
 class ExcelHandler:
     """Charge, filtre et met à jour le fichier Excel des candidatures."""
 
-    # Noms des colonnes
+    # Noms des colonnes (doivent correspondre exactement au fichier Excel)
     COL_ENTREPRISE = "Entreprise"
-    COL_LIEU = "lieu"
-    COL_CONTACT = "contact"
+    COL_LIEU = "Lieu"
+    COL_CONTACT = "Contact"
+    COL_NOM_PERSONNE = "Nom de la personne "  # espace trailing dans le xlsx
+    COL_SCORE = "Score"
     COL_POSTE = "Intitulé de poste"
-    COL_DATE_CONTACT = "date de contact"
+    COL_DATE_CONTACT = "Date de contact"
 
     def __init__(self, filepath: str) -> None:
         self.filepath = filepath
@@ -23,8 +25,10 @@ class ExcelHandler:
         """Charge le fichier Excel en mémoire."""
         self.df = pd.read_excel(self.filepath)
         # Convertir en object pour pouvoir y écrire des strings même si tout est NaN
-        self.df[self.COL_DATE_CONTACT] = self.df[self.COL_DATE_CONTACT].astype(object)
-        self.df[self.COL_CONTACT] = self.df[self.COL_CONTACT].astype(object)
+        for col in (self.COL_DATE_CONTACT, self.COL_CONTACT,
+                     self.COL_NOM_PERSONNE, self.COL_SCORE):
+            if col in self.df.columns:
+                self.df[col] = self.df[col].astype(object)
 
     def save(self) -> None:
         """Sauvegarde le DataFrame dans le fichier Excel."""
@@ -41,9 +45,31 @@ class ExcelHandler:
         )
         return self.df[mask]
 
+    # ------------------------------------------------------------------
+    # Écriture
+    # ------------------------------------------------------------------
+
     def set_contact_email(self, index: int, email: str) -> None:
         """Écrit un email de contact dans une ligne donnée."""
         self.df.at[index, self.COL_CONTACT] = email
+
+    def set_contact_name(self, index: int, name: str) -> None:
+        """Écrit le nom de la personne associée à l'email trouvé."""
+        self.df.at[index, self.COL_NOM_PERSONNE] = name
+
+    def set_score(self, index: int, score: int) -> None:
+        """Écrit le score de l'email trouvé."""
+        self.df.at[index, self.COL_SCORE] = score
+
+    def mark_sent(self, index: int) -> None:
+        """Marque une ligne comme envoyée avec la date/heure actuelle."""
+        self.df.at[index, self.COL_DATE_CONTACT] = datetime.now().strftime(
+            "%Y-%m-%d %H:%M:%S"
+        )
+
+    # ------------------------------------------------------------------
+    # Lecture
+    # ------------------------------------------------------------------
 
     def has_email(self, row: pd.Series) -> bool:
         """Vérifie si la ligne a un email de contact renseigné."""
@@ -51,12 +77,6 @@ class ExcelHandler:
         if pd.isna(val):
             return False
         return str(val).strip() != ""
-
-    def mark_sent(self, index: int) -> None:
-        """Marque une ligne comme envoyée avec la date/heure actuelle."""
-        self.df.at[index, self.COL_DATE_CONTACT] = datetime.now().strftime(
-            "%Y-%m-%d %H:%M:%S"
-        )
 
     def get_company_name(self, row: pd.Series) -> str:
         """Extrait le nom de l'entreprise d'une ligne."""
