@@ -32,7 +32,7 @@ config.py
 secrets.py
 
 # Fichier Excel avec données personnelles des entreprises
-companies.xlsx
+Stage.xlsx
 *.xlsx
 *.xls
 *.txt
