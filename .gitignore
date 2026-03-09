@@ -35,6 +35,7 @@ secrets.py
 companies.xlsx
 *.xlsx
 *.xls
+*.txt
 
 # Logs
 *.log
