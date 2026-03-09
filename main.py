@@ -60,10 +60,13 @@ def _find_missing_emails(excel: ExcelHandler, logger: logging.Logger) -> int:
     logger.info(f"{len(missing)} entreprise(s) sans email — lancement de la recherche web.")
 
     finder = EmailFinder(
-        max_results_per_query=getattr(config, "SEARCH_MAX_RESULTS", 5),
-        max_pages_to_scrape=getattr(config, "SEARCH_MAX_PAGES", 8),
-        request_timeout=getattr(config, "SEARCH_TIMEOUT", 10),
-        delay_between_requests=getattr(config, "SEARCH_DELAY", 1.0),
+        max_results_per_query=getattr(config, "SEARCH_MAX_RESULTS", 10),
+        max_pages_to_scrape=getattr(config, "SEARCH_MAX_PAGES", 20),
+        request_timeout=getattr(config, "SEARCH_TIMEOUT", 5),
+        delay_between_requests=getattr(config, "SEARCH_DELAY", 0.2),
+        concurrent_requests=getattr(config, "SEARCH_CONCURRENT_REQUESTS", 10),
+        retry_count=getattr(config, "SEARCH_RETRY", 2),
+        cache_ttl=getattr(config, "SEARCH_CACHE_TTL", 86400),
     )
 
     min_score = getattr(config, "SEARCH_MIN_SCORE", 5)

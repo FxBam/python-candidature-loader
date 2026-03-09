@@ -45,8 +45,9 @@ _MED_KEYWORDS: list[tuple[re.Pattern, int]] = [
 
 # Mots-clés faiblement pertinents (contact générique)
 _LOW_KEYWORDS: list[tuple[re.Pattern, int]] = [
-    (re.compile(r"^contact@", re.I), 10),
-    (re.compile(r"^info@", re.I), 5),
+    (re.compile(r"^contact$", re.I), 10),
+    (re.compile(r"^info$", re.I), 5),
+    (re.compile(r"^accueil$", re.I), 5),
 ]
 
 # Mots-clés à pénaliser
@@ -57,10 +58,27 @@ _PENALTY_KEYWORDS: list[tuple[re.Pattern, int]] = [
     (re.compile(r"spam", re.I), -80),
     (re.compile(r"notification", re.I), -60),
     (re.compile(r"support", re.I), -20),
-    (re.compile(r"webmaster", re.I), -10),
+    (re.compile(r"webmaster", re.I), -15),
     (re.compile(r"abuse", re.I), -50),
     (re.compile(r"postmaster", re.I), -50),
     (re.compile(r"mailer[-_]?daemon", re.I), -80),
+    (re.compile(r"^sales@", re.I), -10),
+    (re.compile(r"^marketing@", re.I), -10),
+    (re.compile(r"^commercial@", re.I), -5),
+    (re.compile(r"^pr@", re.I), -15),
+    (re.compile(r"^press@", re.I), -15),
+    (re.compile(r"^presse@", re.I), -15),
+    (re.compile(r"^billing@", re.I), -30),
+    (re.compile(r"^invoice", re.I), -30),
+    (re.compile(r"^comptabilite@", re.I), -20),
+    (re.compile(r"^admin@", re.I), -5),
+    (re.compile(r"alerte", re.I), -40),
+    (re.compile(r"fraude", re.I), -60),
+    (re.compile(r"bounce", re.I), -60),
+    (re.compile(r"do[-_.]?not[-_.]?reply", re.I), -100),
+    (re.compile(r"privacy", re.I), -30),
+    (re.compile(r"rgpd", re.I), -20),
+    (re.compile(r"dpo@", re.I), -20),
 ]
 
 # Domaines d'email gratuits / non professionnels
@@ -88,8 +106,18 @@ def _normalize_company(name: str) -> str:
     return re.sub(r"[\s\-_.]+", "", name.lower())
 
 
-def score_email(email: str, company_name: str) -> ScoredEmail:
-    """Calcule le score de pertinence d'un email pour une candidature."""
+def score_email(
+    email: str,
+    company_name: str,
+    official_domain: str = "",
+) -> ScoredEmail:
+    """Calcule le score de pertinence d'un email pour une candidature.
+
+    Args:
+        email: Adresse email à scorer.
+        company_name: Nom de l'entreprise recherchée.
+        official_domain: Domaine du site officiel (ex: ``safran.fr``).
+    """
     result = ScoredEmail(email=email, score=0)
 
     local_part = email.split("@")[0].lower()
@@ -108,6 +136,11 @@ def score_email(email: str, company_name: str) -> ScoredEmail:
         if pattern.search(local_part):
             result.score += pts  # pts est négatif
             result.reasons.append(f"{pts} pénalité '{pattern.pattern}'")
+
+    # --- Bonus domaine = site officiel ---
+    if official_domain and domain_part == official_domain:
+        result.score += 25
+        result.reasons.append("+25 domaine = site officiel")
 
     # --- Bonus domaine entreprise ---
     norm_company = _normalize_company(company_name)
@@ -128,19 +161,44 @@ def score_email(email: str, company_name: str) -> ScoredEmail:
         result.score += 10
         result.reasons.append("+10 domaine professionnel")
 
+    # --- Pénalité domaine sans rapport avec l'entreprise ---
+    if (
+        domain_part
+        and domain_part not in _FREE_PROVIDERS
+        and norm_company
+        and norm_domain
+        and norm_company not in norm_domain
+        and norm_domain not in norm_company
+    ):
+        result.score -= 10
+        result.reasons.append("-10 domaine sans rapport avec l'entreprise")
+
     return result
 
 
-def select_best_email(emails: list[str], company_name: str) -> ScoredEmail | None:
+def select_best_email(
+    emails: list[str],
+    company_name: str,
+    official_domain: str = "",
+) -> ScoredEmail | None:
     """Classe les emails et renvoie le meilleur (score le plus élevé).
 
-    Returns None si la liste est vide ou tous les scores sont négatifs.
+    Args:
+        emails: Liste des adresses trouvées.
+        company_name: Nom de l'entreprise.
+        official_domain: Domaine du site officiel (bonus de score).
+
+    Returns:
+        Le ``ScoredEmail`` le plus pertinent, ou ``None``.
     """
     if not emails:
         return None
 
-    scored = [score_email(e, company_name) for e in emails]
-    scored.sort(key=lambda s: s.score, reverse=True)
+    scored = [
+        score_email(e, company_name, official_domain)
+        for e in emails
+    ]
+    scored.sort(key=lambda s: (s.score, -len(s.email)), reverse=True)
 
     best = scored[0]
     if best.score < 0:

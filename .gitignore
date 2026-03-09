@@ -41,6 +41,9 @@ Stage.xlsx
 *.log
 logs/
 
+# Cache pages web (email_finder)
+cache/
+
 # Fichiers système
 .DS_Store
 Thumbs.db
