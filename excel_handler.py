@@ -20,6 +20,8 @@ class ExcelHandler:
     def load(self) -> None:
         """Charge le fichier Excel en mémoire."""
         self.df = pd.read_excel(self.filepath)
+        # Convertir en object pour pouvoir y écrire des strings même si tout est NaN
+        self.df[self.COL_DATE_CONTACT] = self.df[self.COL_DATE_CONTACT].astype(object)
 
     def save(self) -> None:
         """Sauvegarde le DataFrame dans le fichier Excel."""
