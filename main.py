@@ -81,10 +81,12 @@ def _find_missing_emails(excel: ExcelHandler, logger: logging.Logger) -> int:
         if result and result.score >= min_score:
             excel.set_contact_email(idx, result.email)
             excel.set_score(idx, result.score)
-            # Extraire un éventuel nom depuis les raisons du scoring
+            if result.person_name:
+                excel.set_contact_name(idx, result.person_name)
             excel.save()
+            name_tag = f" [{result.person_name}]" if result.person_name else ""
             logger.info(
-                f"  [TROUVÉ] {company} -> {result.email} "
+                f"  [TROUVÉ] {company} -> {result.email}{name_tag} "
                 f"(score={result.score}) — sauvegardé"
             )
             found_count += 1

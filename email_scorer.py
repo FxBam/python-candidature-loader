@@ -24,6 +24,7 @@ _HIGH_KEYWORDS: list[tuple[re.Pattern, int]] = [
     (re.compile(r"recrutement", re.I), 50),
     (re.compile(r"recruitment", re.I), 50),
     (re.compile(r"recrut", re.I), 45),
+    (re.compile(r"candidature", re.I), 45),
     (re.compile(r"emploi", re.I), 45),
     (re.compile(r"career|carriere|carrieres", re.I), 45),
     (re.compile(r"\bjob", re.I), 40),
@@ -35,7 +36,7 @@ _HIGH_KEYWORDS: list[tuple[re.Pattern, int]] = [
 # Mots-clés moyennement pertinents (responsable IT / tech / direction)
 _MED_KEYWORDS: list[tuple[re.Pattern, int]] = [
     (re.compile(r"informatique", re.I), 30),
-    (re.compile(r"\bit[.-_]", re.I), 25),
+    (re.compile(r"(?:^|[._-])it(?:$|[._-])", re.I), 25),
     (re.compile(r"tech", re.I), 25),
     (re.compile(r"dev", re.I), 20),
     (re.compile(r"responsable", re.I), 20),
@@ -96,9 +97,11 @@ class ScoredEmail:
     email: str
     score: int = 0
     reasons: list[str] = field(default_factory=list)
+    person_name: str = ""
 
     def __repr__(self) -> str:
-        return f"ScoredEmail({self.email!r}, score={self.score})"
+        name_part = f", name={self.person_name!r}" if self.person_name else ""
+        return f"ScoredEmail({self.email!r}, score={self.score}{name_part})"
 
 
 def _normalize_company(name: str) -> str:
@@ -136,6 +139,12 @@ def score_email(
         if pattern.search(local_part):
             result.score += pts  # pts est négatif
             result.reasons.append(f"{pts} pénalité '{pattern.pattern}'")
+
+    # --- Bonus email nominatif (prénom.nom) ---
+    # Favorise un contact personne valide par rapport à contact@/info@.
+    if re.fullmatch(r"[a-z]{2,}[._-][a-z]{2,}(?:[._-][a-z]{2,})?", local_part):
+        result.score += 20
+        result.reasons.append("+20 format nominatif")
 
     # --- Bonus domaine = site officiel ---
     if official_domain and domain_part == official_domain:
@@ -180,6 +189,7 @@ def select_best_email(
     emails: list[str],
     company_name: str,
     official_domain: str = "",
+    name_map: dict[str, str] | None = None,
 ) -> ScoredEmail | None:
     """Classe les emails et renvoie le meilleur (score le plus élevé).
 
@@ -187,12 +197,15 @@ def select_best_email(
         emails: Liste des adresses trouvées.
         company_name: Nom de l'entreprise.
         official_domain: Domaine du site officiel (bonus de score).
+        name_map: Mapping email -> nom de la personne associée.
 
     Returns:
         Le ``ScoredEmail`` le plus pertinent, ou ``None``.
     """
     if not emails:
         return None
+
+    name_map = name_map or {}
 
     scored = [
         score_email(e, company_name, official_domain)
@@ -203,5 +216,9 @@ def select_best_email(
     best = scored[0]
     if best.score < 0:
         return None
+
+    # Attacher le nom de la personne s'il est connu
+    if best.email in name_map:
+        best.person_name = name_map[best.email]
 
     return best

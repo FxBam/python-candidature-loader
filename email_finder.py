@@ -1,28 +1,30 @@
 """Recherche async d'emails de contact via multi-moteur + scraping parallèle.
 
-Améliorations par rapport à la version séquentielle :
-- **asyncio + aiohttp** : scraping de toutes les pages en parallèle (×10 vitesse)
-- **Multi-moteur** : DuckDuckGo + Bing en même temps
+Fonctionnalités :
+- **asyncio + aiohttp** : scraping parallèle de toutes les pages (×10 vitesse)
+- **Multi-moteur** : DuckDuckGo + Bing
+- **LinkedIn** : recherche de profils RH / IT → génération d'emails candidats
+- **Extraction de noms** : depuis les pages HTML, les local-parts, LinkedIn
 - **Détection d'emails obfusqués** : (at), [at], {at}
 - **Cache disque** : évite de re-télécharger les pages (TTL 24 h)
 - **Filtrage renforcé** : bloque placeholders, hash DSN, sites d'emploi
-- **Détection du domaine officiel** : tentative sur .fr / .com / .eu / .io / .net
-  avec variantes tirets pour les noms multi-mots
 
 Architecture :
     find_best_email()          ← API publique synchrone
       └─ asyncio.run(_async_find())
-           ├─ DDG (via thread executor, séquentiel pour respect du rate limit)
-           ├─ Bing (aiohttp, parallèle)
+           ├─ DDG + Bing (recherche multi-moteur)
+           ├─ LinkedIn (profils RH / IT → emails candidats)
            ├─ Identification du site officiel (HEAD parallèles)
-           ├─ Scraping de toutes les URLs (aiohttp + Semaphore)
-           └─ Filtrage → scoring → meilleur email
+           ├─ Scraping parallèle (aiohttp + Semaphore + cache)
+           ├─ Extraction de noms (HTML context + local part + LinkedIn)
+           └─ Filtrage → scoring (avec name_map) → meilleur email
 """
 
 import asyncio
 import logging
 import re
 import time
+import unicodedata
 from dataclasses import dataclass
 from typing import Optional
 from urllib.parse import quote_plus, urljoin, urlparse
@@ -40,10 +42,10 @@ logger = logging.getLogger("candidature")
 # Regex
 # ---------------------------------------------------------------------------
 
-# Regex standard
+# Email standard
 _EMAIL_RE = re.compile(r"[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}")
 
-# Regex pour emails obfusqués : user (at) domain.com, user [at] domain.com
+# Emails obfusqués : user (at) domain.com, user [at] domain.com
 _OBFUSCATED_RE = re.compile(
     r"([a-zA-Z0-9._%+\-]+)"
     r"\s*(?:\(at\)|\[at\]|\{at\}|&#64;|\s+at\s+)\s*"
@@ -51,13 +53,32 @@ _OBFUSCATED_RE = re.compile(
     re.IGNORECASE,
 )
 
-# Détecte les parties locales qui ressemblent à un placeholder
+# Placeholders dans les local parts
 _PLACEHOLDER_LOCAL_RE = re.compile(
     r"^(?:votre[._]|your[._]|nom[._]prenom|name[._]|prenom[._]|"
     r"firstname[._]|email[._]|test[._]|exemple|example|user[._]|"
     r"utilisateur|someone|quelquun|xxx|yyy|zzz)",
     re.IGNORECASE,
 )
+
+# Regex pour détecter un nom de type « Prénom Nom » en français
+# Accepte les accents, tirets composés, de/du/le etc.
+_NAME_RE = re.compile(
+    r"\b([A-ZÀ-ÖÙ-Ý][a-zà-öù-ÿ]{1,20}"        # Prénom
+    r"(?:\s+(?:de|du|le|la|des|van|von|el))?"    # Particule optionnelle
+    r"\s+[A-ZÀ-ÖÙ-Ý][a-zà-öù-ÿA-ZÀ-ÖÙ-Ý\-]{1,25})\b"  # Nom
+)
+
+# Local parts qui sont des rôles, pas des noms de personnes
+_ROLE_LOCAL_PARTS = {
+    "contact", "info", "rh", "hr", "recrutement", "recruitment",
+    "careers", "jobs", "job", "emploi", "stage", "intern", "talent",
+    "candidature", "candidatures",
+    "accueil", "admin", "support", "webmaster", "sales", "marketing",
+    "commercial", "presse", "press", "pr", "communication",
+    "comptabilite", "billing", "invoice", "direction", "secretariat",
+    "noreply", "no-reply", "newsletter", "postmaster", "abuse",
+}
 
 _HEADERS = {
     "User-Agent": (
@@ -96,7 +117,7 @@ _IGNORED_EMAIL_DOMAINS: set[str] = {
     "unpkg.com", "cdnjs.cloudflare.com", "fontawesome.com",
     # Juridique / org
     "creativecommons.org",
-    # Sites d'emploi (faux positifs : ce n'est pas l'entreprise !)
+    # Sites d'emploi
     "jobted.com", "jobted.fr",
     "indeed.com", "indeed.fr",
     "glassdoor.com", "glassdoor.fr",
@@ -125,6 +146,48 @@ _CONTACT_PATHS: list[str] = [
     "/mentions-legales", "/legal", "/legal-notice",
 ]
 
+_LINKEDIN_RH_ROLE_RE = re.compile(
+    r"\b("
+    r"drh|rh|"
+    r"ressources?\s+humaines?|human\s+resources?|"
+    r"recrut(?:ement|eur|euse|er|ing)?|"
+    r"talent\s+acquisition|talent\s+recruit(?:er|ment)|"
+    r"people\s+ops?"
+    r")\b",
+    re.IGNORECASE,
+)
+
+_LINKEDIN_IT_SCOPE_RE = re.compile(
+    r"\b(informatique|it|tech(?:nique)?|si|systemes?|engineering|digital)\b",
+    re.IGNORECASE,
+)
+
+_LINKEDIN_IT_LEAD_RE = re.compile(
+    r"\b(directeur|directrice|responsable|manager|head|lead|chief|dsi|cto|cio)\b",
+    re.IGNORECASE,
+)
+
+_LOCATION_STOPWORDS = {
+    "france", "cedex", "region", "departement", "metropole",
+    "ville", "arrondissement", "centre", "nord", "sud", "est", "ouest",
+}
+
+# Mots qui ne sont PAS des prénoms/noms (détection de faux profils)
+_NOT_A_NAME_WORDS = {
+    # Titres de poste
+    "expert", "manager", "director", "directeur", "responsable",
+    "consultant", "developer", "développeur", "engineer", "ingénieur",
+    "senior", "junior", "lead", "chief", "head", "officer",
+    "assistant", "stagiaire", "intern", "alternant",
+    "delivery", "product", "project", "programme",
+    # Départements
+    "it", "rh", "hr", "digital", "tech", "data", "cloud",
+    "web", "design", "marketing", "commercial", "finance",
+    # Génériques
+    "positive", "global", "group", "groupe", "team", "équipe",
+    "france", "europe", "international",
+}
+
 
 # ---------------------------------------------------------------------------
 # Contexte de recherche
@@ -140,18 +203,181 @@ class _SearchContext:
 
     @property
     def company_slug(self) -> str:
-        """Nom sans espaces / tirets, minuscules."""
         return re.sub(r"[\s\-_.]+", "", self.company_name.lower())
 
     @property
     def company_slug_hyphen(self) -> str:
-        """Nom avec tirets (pour les domaines multi-mots)."""
         return re.sub(r"[\s_.]+", "-", self.company_name.lower())
 
     @property
     def location_short(self) -> str:
-        """Première partie du lieu (ville)."""
-        return self.location.split(",")[0].strip() if self.location else ""
+        """Extrait la commune nettoyée (sans code postal, cedex, département)."""
+        raw = self.location.split(",")[0].strip() if self.location else ""
+        if not raw:
+            return ""
+        # Supprimer le code postal (5 chiffres)
+        raw = re.sub(r"\b\d{5}\b", "", raw).strip()
+        # Supprimer le département entre parenthèses : (69), (01), etc.
+        raw = re.sub(r"\(\d{1,3}\)", "", raw).strip()
+        # Supprimer "cedex" et ce qui suit
+        raw = re.sub(r"\bcedex\b.*", "", raw, flags=re.IGNORECASE).strip()
+        return raw
+
+
+# ===========================================================================
+# Utilitaires d'extraction de noms
+# ===========================================================================
+
+def _remove_accents(text: str) -> str:
+    """Supprime les accents d'un texte (pour générer des emails)."""
+    nfkd = unicodedata.normalize("NFKD", text)
+    return "".join(c for c in nfkd if not unicodedata.combining(c))
+
+
+def _normalize_text_for_match(text: str) -> str:
+    """Normalise un texte pour les comparaisons souples."""
+    if not text:
+        return ""
+    clean = _remove_accents(text.lower())
+    clean = re.sub(r"[^a-z0-9]+", " ", clean)
+    return re.sub(r"\s+", " ", clean).strip()
+
+
+def _guess_name_from_local_part(local: str) -> str:
+    """Devine un nom de personne à partir du local part d'un email.
+
+    Exemples :
+        jean.dupont  → Jean Dupont
+        j.dupont     → J. Dupont
+        jean-dupont  → Jean Dupont
+        jdupont      → (vide — impossible de deviner)
+        contact      → (vide — c'est un rôle)
+    """
+    # Ne pas essayer sur les rôles
+    clean = re.sub(r"[.\-_]", "", local).lower()
+    if clean in _ROLE_LOCAL_PARTS:
+        return ""
+
+    # Séparer par . ou - ou _
+    parts = re.split(r"[.\-_]", local)
+    if len(parts) < 2:
+        return ""
+
+    # Vérifier que les parties ressemblent à des noms (pas de chiffres)
+    name_parts: list[str] = []
+    for p in parts:
+        p = p.strip()
+        if not p or not p.isalpha():
+            return ""
+        if len(p) == 1:
+            name_parts.append(p.upper() + ".")
+        else:
+            name_parts.append(p.capitalize())
+
+    return " ".join(name_parts)
+
+
+def _extract_names_near_email(html: str, email: str) -> str:
+    """Cherche un nom de personne dans le voisinage d'un email dans le HTML.
+
+    Regarde ±200 caractères autour de l'email et cherche un pattern
+    « Prénom Nom ».
+    """
+    idx = html.find(email)
+    if idx == -1:
+        # Essayer sans le @
+        local = email.split("@")[0]
+        idx = html.find(local)
+    if idx == -1:
+        return ""
+
+    # Extraire le contexte autour
+    start = max(0, idx - 200)
+    end = min(len(html), idx + len(email) + 200)
+    context = html[start:end]
+
+    # Nettoyer les balises HTML
+    context = re.sub(r"<[^>]+>", " ", context)
+    context = re.sub(r"\s+", " ", context)
+
+    # Chercher un nom
+    match = _NAME_RE.search(context)
+    if match:
+        candidate = match.group(1).strip()
+        # Vérifier que ce n'est pas un faux positif courant
+        lower = candidate.lower()
+        first_word = lower.split()[0] if lower.split() else ""
+        if any(w in lower for w in [
+            "mentions légales", "politique de", "conditions",
+            "tous droits", "copyright", "powered by",
+        ]):
+            return ""
+        # Rejeter les groupes commençant par un verbe / mot courant
+        _bad_first_words = {
+            "contactez", "contacter", "appelez", "appeler",
+            "ecrivez", "ecrire", "envoyez", "envoyer",
+            "rejoignez", "rejoindre", "découvrez", "decouvrez",
+            "bienvenue", "bonjour", "merci", "veuillez",
+            "notre", "votre", "nous", "pour", "chez",
+            "adresse", "siege", "siège", "site",
+            "formulaire", "page", "voir",
+        }
+        if first_word in _bad_first_words:
+            # Réessayer en sautant ce match
+            remaining = context[match.end():]
+            match2 = _NAME_RE.search(remaining)
+            if match2:
+                candidate = match2.group(1).strip()
+                lower = candidate.lower()
+                first_word = lower.split()[0] if lower.split() else ""
+                if first_word in _bad_first_words:
+                    return ""
+            else:
+                return ""
+        return candidate
+
+    return ""
+
+
+def _generate_email_variants(
+    first_name: str,
+    last_name: str,
+    domain: str,
+) -> list[str]:
+    """Génère des variantes d'email à partir d'un prénom/nom + domaine.
+
+    Exemples :
+        Jean, Dupont, company.fr → [
+            jean.dupont@company.fr,
+            j.dupont@company.fr,
+            jdupont@company.fr,
+            jean-dupont@company.fr,
+        ]
+    """
+    if not first_name or not last_name or not domain:
+        return []
+
+    first = _remove_accents(first_name.lower().strip())
+    last = _remove_accents(last_name.lower().strip())
+
+    # Nettoyer les caractères non-alpha
+    first = re.sub(r"[^a-z]", "", first)
+    last = re.sub(r"[^a-z\-]", "", last)
+
+    # Évite de générer des adresses depuis des noms trop courts/ambiguës.
+    if not first or not last or len(first) < 2 or len(last) < 2:
+        return []
+
+    variants = [
+        f"{first}.{last}@{domain}",
+        f"{first[0]}.{last}@{domain}",
+        f"{first}{last}@{domain}",
+        f"{first}-{last}@{domain}",
+        f"{first[0]}{last}@{domain}",
+        f"{last}.{first}@{domain}",
+        f"{last}{first[0]}@{domain}",
+    ]
+    return list(dict.fromkeys(variants))  # déduplique en gardant l'ordre
 
 
 # ===========================================================================
@@ -162,7 +388,8 @@ class EmailFinder:
     """Recherche le meilleur email de contact pour une entreprise.
 
     Utilise asyncio + aiohttp pour le scraping parallèle, DuckDuckGo + Bing
-    comme moteurs de recherche, et un cache disque pour éviter les doublons.
+    comme moteurs, LinkedIn pour identifier les bonnes personnes, et un
+    cache disque pour éviter les requêtes redondantes.
     """
 
     def __init__(
@@ -193,10 +420,7 @@ class EmailFinder:
         location: str = "",
         job_title: str = "",
     ) -> Optional[ScoredEmail]:
-        """Recherche le meilleur email de contact (API synchrone).
-
-        Lancement interne de la boucle asyncio pour le scraping parallèle.
-        """
+        """Recherche le meilleur email de contact (API synchrone)."""
         ctx = _SearchContext(
             company_name=company_name,
             location=location,
@@ -220,7 +444,7 @@ class EmailFinder:
 
         connector = aiohttp.TCPConnector(
             limit=self.concurrency,
-            ssl=False,  # désactive vérif SSL pour scraping
+            ssl=False,
         )
         timeout = aiohttp.ClientTimeout(total=self.timeout)
 
@@ -250,7 +474,17 @@ class EmailFinder:
                 )
                 logger.info(f"  Site officiel : {official_site}")
 
-            # ---- Étape 3 : construire les cibles de scraping ---------
+            # ---- Étape 3 : LinkedIn → noms + emails candidats --------
+            linkedin_emails, linkedin_names = await self._search_linkedin(
+                ctx, official_domain, session,
+            )
+            if linkedin_emails:
+                logger.info(
+                    f"  LinkedIn: {len(linkedin_emails)} email(s) candidat(s) "
+                    f"depuis {len(linkedin_names)} profil(s)"
+                )
+
+            # ---- Étape 4 : construire les cibles de scraping ---------
             targets: set[str] = set()
             if official_site:
                 targets.add(official_site)
@@ -258,45 +492,86 @@ class EmailFinder:
                     targets.add(urljoin(official_site, path))
             for url in all_urls[: self.max_pages]:
                 if official_site and url.startswith(official_site):
-                    continue  # déjà couvert
+                    continue
                 targets.add(url)
 
-            # ---- Étape 4 : scraping parallèle ------------------------
+            # ---- Étape 5 : scraping parallèle ------------------------
             all_emails: set[str] = set(snippet_emails)
+            all_emails.update(linkedin_emails)
+
+            # name_map : email → nom de la personne
+            name_map: dict[str, str] = dict(linkedin_names)
+
             sem = asyncio.Semaphore(self.concurrency)
             tasks = [
                 self._scrape_with_sem(sem, session, url)
                 for url in targets
             ]
-            results = await asyncio.gather(*tasks, return_exceptions=True)
-            for result in results:
+            scrape_results = await asyncio.gather(
+                *tasks, return_exceptions=True,
+            )
+            for result in scrape_results:
                 if isinstance(result, set):
                     all_emails.update(result)
 
-            # ---- Étape 5 : filtrage + scoring ------------------------
+            # ---- Étape 6 : extraire les noms -------------------------
+            # 6a. Depuis le local part de chaque email
+            for email in all_emails:
+                if email in name_map:
+                    continue
+                local = email.split("@")[0]
+                name = _guess_name_from_local_part(local)
+                if name:
+                    name_map[email] = name
+
+            # 6b. Depuis le HTML (cache) des pages scrapées
+            #     Seulement pour les emails personnels (pas les rôles)
+            for email in all_emails:
+                if email in name_map:
+                    continue
+                local = email.split("@")[0].lower()
+                clean_local = re.sub(r"[.\-_]", "", local)
+                if clean_local in _ROLE_LOCAL_PARTS:
+                    continue  # pas de nom pour contact@, rh@, etc.
+                for url in list(targets)[:30]:
+                    cached = self.cache.get(url)
+                    if cached:
+                        name = _extract_names_near_email(cached, email)
+                        if name:
+                            name_map[email] = name
+                            break
+
+            # ---- Étape 7 : filtrage + scoring ------------------------
             filtered = self._filter_emails(all_emails)
             logger.info(f"  {len(filtered)} email(s) après filtrage")
 
             for e in filtered:
-                logger.debug(f"    - {e}")
+                n = name_map.get(e, "")
+                tag = f" ({n})" if n else ""
+                logger.debug(f"    - {e}{tag}")
 
-            best = select_best_email(filtered, ctx.company_name, official_domain)
+            best = select_best_email(
+                filtered, ctx.company_name, official_domain, name_map,
+            )
 
             if best:
+                name_tag = f" [{best.person_name}]" if best.person_name else ""
                 logger.info(
-                    f"  => Meilleur : {best.email} (score={best.score})"
+                    f"  => Meilleur : {best.email}{name_tag} "
+                    f"(score={best.score})"
                 )
                 for r in best.reasons:
                     logger.debug(f"       {r}")
             else:
                 logger.warning(
-                    f"  => Aucun email pertinent trouvé pour {ctx.company_name}."
+                    f"  => Aucun email pertinent trouvé pour "
+                    f"{ctx.company_name}."
                 )
 
             return best
 
     # ==================================================================
-    # Recherche multi-moteur
+    # Recherche multi-moteur (DDG + Bing)
     # ==================================================================
 
     async def _search_all_engines(
@@ -308,13 +583,11 @@ class EmailFinder:
 
         queries = self._build_queries(ctx)
 
-        # DDG dans un thread executor (évite de bloquer la boucle)
         loop = asyncio.get_running_loop()
         ddg_urls, ddg_emails = await loop.run_in_executor(
             None, self._search_ddg_sync, queries,
         )
 
-        # Bing en parallèle (top 5 requêtes)
         bing_tasks = [
             self._search_bing(query, session)
             for query in queries[:5]
@@ -323,7 +596,6 @@ class EmailFinder:
             *bing_tasks, return_exceptions=True,
         )
 
-        # Fusionner
         all_urls = list(ddg_urls)
         all_emails: set[str] = set(ddg_emails)
         seen_urls: set[str] = set(ddg_urls)
@@ -346,8 +618,6 @@ class EmailFinder:
     def _search_ddg_sync(
         self, queries: list[str],
     ) -> tuple[list[str], set[str]]:
-        """Recherche DDG séquentielle (appelée via ``run_in_executor``)."""
-
         urls: list[str] = []
         emails: set[str] = set()
         seen: set[str] = set()
@@ -386,8 +656,6 @@ class EmailFinder:
         query: str,
         session: aiohttp.ClientSession,
     ) -> tuple[list[str], set[str]]:
-        """Recherche Bing via scraping HTML (best-effort)."""
-
         url = (
             f"https://www.bing.com/search"
             f"?q={quote_plus(query)}&count=10&setlang=fr"
@@ -423,7 +691,7 @@ class EmailFinder:
             return [], set()
 
     # ==================================================================
-    # Construction des requêtes
+    # Requêtes de recherche
     # ==================================================================
 
     def _build_queries(self, ctx: _SearchContext) -> list[str]:
@@ -433,8 +701,19 @@ class EmailFinder:
         loc = ctx.location_short
         slug = ctx.company_slug
 
-        queries: list[str] = [
-            # --- Priorité haute : email RH / recrutement ---
+        queries: list[str] = []
+
+        # --- Requêtes avec lieu en priorité (désambiguïsation) ---
+        if loc:
+            queries.extend([
+                f'"{name}" {loc} email recrutement candidature',
+                f'"{name}" {loc} email RH ressources humaines',
+                f'"{name}" {loc} email contact',
+                f'"{name}" {loc} stage informatique contact',
+            ])
+
+        # --- Priorité haute : email RH / recrutement ---
+        queries.extend([
             f'"{name}" email recrutement',
             f'"{name}" email RH ressources humaines',
             f'"{name}" contact recrutement candidature',
@@ -453,16 +732,317 @@ class EmailFinder:
             f'site:{slug}.com contact email',
             f'site:{slug}.fr "@"',
             f'"{name}" site officiel contact',
-            # --- Mentions légales (souvent un email) ---
+            # --- Mentions légales ---
             f'"{name}" mentions légales email',
-        ]
-
-        # Requêtes géolocalisées
-        if loc:
-            queries.insert(3, f'"{name}" {loc} email contact')
-            queries.insert(4, f'"{name}" {loc} recrutement')
+        ])
 
         return queries
+
+    def _build_linkedin_queries(self, ctx: _SearchContext) -> list[str]:
+        """Construit les requêtes pour trouver des profils LinkedIn pertinents.
+
+        Quand la commune est connue, elle est incluse dans TOUTES les requêtes
+        principales pour éviter de confondre avec une entreprise homonyme dans
+        une autre ville.
+        """
+
+        name = ctx.company_name
+        loc = ctx.location_short
+
+        if loc:
+            # Requêtes avec commune en priorité pour désambiguïser
+            queries: list[str] = [
+                # RH / recrutement + lieu
+                f'site:linkedin.com/in "{name}" {loc} recrutement',
+                f'site:linkedin.com/in "{name}" {loc} RH ressources humaines',
+                f'site:linkedin.com/in "{name}" {loc} talent acquisition',
+                # IT / tech + lieu
+                f'site:linkedin.com/in "{name}" {loc} responsable informatique',
+                f'site:linkedin.com/in "{name}" {loc} directeur technique DSI',
+                # Fallback sans lieu (au cas où le lieu réduirait trop)
+                f'site:linkedin.com/in "{name}" RH recrutement',
+                f'site:linkedin.com/in "{name}" responsable informatique',
+            ]
+        else:
+            queries = [
+                f'site:linkedin.com/in "{name}" recrutement',
+                f'site:linkedin.com/in "{name}" RH ressources humaines',
+                f'site:linkedin.com/in "{name}" talent acquisition',
+                f'site:linkedin.com/in "{name}" responsable informatique',
+                f'site:linkedin.com/in "{name}" directeur technique DSI',
+            ]
+
+        return queries
+
+    @staticmethod
+    def _location_matches(full_text: str, location: str) -> bool:
+        """Valide que le snippet semble bien lié à la commune recherchée."""
+        if not location:
+            return True
+
+        text = _normalize_text_for_match(full_text)
+        loc = _normalize_text_for_match(location)
+        if not text or not loc:
+            return False
+
+        if loc in text:
+            return True
+
+        tokens = [
+            tok for tok in loc.split()
+            if len(tok) >= 3 and tok not in _LOCATION_STOPWORDS
+        ]
+        if not tokens:
+            return False
+
+        return any(
+            re.search(rf"\b{re.escape(tok)}\b", text)
+            for tok in tokens
+        )
+
+    @staticmethod
+    def _has_target_role(full_text: str, job_title: str) -> bool:
+        """Valide un rôle RH/DRH ou direction de service IT."""
+        text = _normalize_text_for_match(full_text)
+        if not text:
+            return False
+
+        if _LINKEDIN_RH_ROLE_RE.search(text):
+            return True
+
+        if not (
+            _LINKEDIN_IT_SCOPE_RE.search(text)
+            and _LINKEDIN_IT_LEAD_RE.search(text)
+        ):
+            return False
+
+        # Si un intitulé de poste est fourni, on l'utilise pour confirmer
+        # que le profil colle à la recherche cible (ex: "informatique").
+        normalized_job = _normalize_text_for_match(job_title)
+        if not normalized_job:
+            return True
+
+        job_tokens = [
+            tok for tok in normalized_job.split()
+            if len(tok) >= 4 and tok not in _LOCATION_STOPWORDS
+        ]
+        if not job_tokens:
+            return True
+
+        return any(
+            re.search(rf"\b{re.escape(tok)}\b", text)
+            for tok in job_tokens
+        )
+
+    # ==================================================================
+    # LinkedIn : recherche de profils → génération d'emails
+    # ==================================================================
+
+    async def _search_linkedin(
+        self,
+        ctx: _SearchContext,
+        official_domain: str,
+        session: aiohttp.ClientSession,
+    ) -> tuple[set[str], dict[str, str]]:
+        """Recherche des profils LinkedIn pour trouver des personnes RH/IT.
+
+        Analyse les snippets DDG/Bing pour extraire des noms, puis génère
+        des emails candidats sur le domaine officiel.
+
+        Returns:
+            (emails, name_map) — emails générés et mapping email → nom
+        """
+        if not official_domain:
+            return set(), {}
+
+        queries = self._build_linkedin_queries(ctx)
+
+        # Lancer DDG dans un thread pour les requêtes LinkedIn
+        loop = asyncio.get_running_loop()
+        profiles = await loop.run_in_executor(
+            None, self._extract_linkedin_profiles_ddg, queries, ctx,
+        )
+
+        if not profiles:
+            return set(), {}
+
+        logger.info(
+            f"  LinkedIn: {len(profiles)} profil(s) pertinent(s) trouvé(s)"
+        )
+
+        # Générer des emails candidats à partir des noms trouvés
+        generated_emails: set[str] = set()
+        name_map: dict[str, str] = {}
+
+        for profile_name, profile_title in profiles:
+            parts = profile_name.split()
+            if len(parts) < 2:
+                continue
+
+            # Rejeter les noms avec des composants abrégés ("Astrid D.")
+            if any(
+                len(p.rstrip(".")) <= 1 for p in parts
+            ):
+                logger.debug(
+                    f"    LinkedIn: {profile_name} ignoré (nom abrégé)"
+                )
+                continue
+
+            # Rejeter les noms qui sont des titres de poste
+            if any(
+                p.lower().rstrip(".") in _NOT_A_NAME_WORDS for p in parts
+            ):
+                logger.debug(
+                    f"    LinkedIn: {profile_name} ignoré (titre de poste)"
+                )
+                continue
+
+            first_name = parts[0]
+            last_name = " ".join(parts[1:])
+            last_for_email = parts[-1]
+
+            variants = _generate_email_variants(
+                first_name, last_for_email, official_domain,
+            )
+
+            for email in variants:
+                generated_emails.add(email)
+                name_map[email] = profile_name
+
+            logger.debug(
+                f"    LinkedIn: {profile_name} ({profile_title}) "
+                f"→ {len(variants)} email(s)"
+            )
+
+        return generated_emails, name_map
+
+    def _extract_linkedin_profiles_ddg(
+        self,
+        queries: list[str],
+        ctx: _SearchContext,
+    ) -> list[tuple[str, str]]:
+        """Extrait des noms et titres depuis les snippets DDG de LinkedIn.
+
+        Returns:
+            Liste de (nom, titre) pour les profils pertinents.
+        """
+        profiles: list[tuple[str, str]] = []
+        seen_names: set[str] = set()
+
+        company_text = _normalize_text_for_match(ctx.company_name)
+        location_text = ctx.location_short
+
+        for query in queries:
+            try:
+                with DDGS() as ddgs:
+                    results = list(
+                        ddgs.text(query, max_results=5)
+                    )
+
+                for r in results:
+                    title = r.get("title", "")
+                    body = r.get("body", "")
+                    url = r.get("href") or r.get("link") or ""
+
+                    # Ne garder que les profils LinkedIn
+                    if "linkedin.com/in/" not in url:
+                        continue
+
+                    # Extraire nom depuis le titre LinkedIn
+                    # Format typique : "Prénom Nom - Titre | LinkedIn"
+                    # ou "Prénom Nom – Titre – Entreprise | LinkedIn"
+                    name, title_text = self._parse_linkedin_snippet(
+                        title, body,
+                    )
+                    normalized_name = _normalize_text_for_match(name)
+                    if not name or normalized_name in seen_names:
+                        continue
+
+                    # Vérifier la pertinence : le snippet mentionne-t-il
+                    # l'entreprise et un poste RH / IT ?
+                    full_text = f"{title} {body}"
+                    full_text_norm = _normalize_text_for_match(full_text)
+
+                    # L'entreprise doit être mentionnée
+                    if company_text and company_text not in full_text_norm:
+                        logger.debug(
+                            f"    LinkedIn: {name} ignoré "
+                            f"(entreprise '{ctx.company_name}' absente du snippet)"
+                        )
+                        continue
+
+                    # Le lieu est obligatoire pour éviter les homonymes.
+                    if not self._location_matches(full_text, location_text):
+                        logger.debug(
+                            f"    LinkedIn: {name} ignoré "
+                            f"(commune '{location_text}' ne correspond pas)"
+                        )
+                        continue
+
+                    # Le rôle doit être RH/DRH ou direction IT.
+                    if not self._has_target_role(full_text, ctx.job_title):
+                        logger.debug(
+                            f"    LinkedIn: {name} ignoré "
+                            f"(rôle non pertinent: ni RH ni direction de service)"
+                        )
+                        continue
+
+                    seen_names.add(normalized_name)
+                    profiles.append((name, title_text))
+                    logger.debug(
+                        f"    LinkedIn profil: {name} — {title_text}"
+                    )
+
+            except Exception as exc:
+                logger.debug(f"  LinkedIn DDG erreur: {exc}")
+
+            time.sleep(self.delay)
+
+        return profiles
+
+    @staticmethod
+    def _parse_linkedin_snippet(
+        title: str,
+        body: str,
+    ) -> tuple[str, str]:
+        """Parse le titre/body d'un snippet LinkedIn pour extraire nom + titre.
+
+        Formats typiques :
+            « Prénom Nom - Titre | LinkedIn »
+            « Prénom Nom – Titre – Entreprise | LinkedIn »
+            « Prénom Nom | LinkedIn »
+        """
+        # Nettoyer "| LinkedIn" de la fin
+        clean = re.sub(r"\s*[|–\-]\s*LinkedIn\s*$", "", title, flags=re.I)
+
+        # Séparer nom et titre
+        for sep in [" - ", " – ", " — ", " | "]:
+            if sep in clean:
+                parts = clean.split(sep, 1)
+                name_candidate = parts[0].strip()
+                title_candidate = parts[1].strip() if len(parts) > 1 else ""
+                # Valider que ça ressemble à un nom (2+ mots, pas trop long)
+                words = name_candidate.split()
+                if 2 <= len(words) <= 5 and all(
+                    w[0].isupper() or w.lower() in (
+                        "de", "du", "le", "la", "des", "van", "von", "el",
+                    )
+                    for w in words if w
+                ):
+                    # Rejeter si un mot est un titre de poste connu
+                    if any(
+                        w.lower().rstrip(".") in _NOT_A_NAME_WORDS
+                        for w in words
+                    ):
+                        break
+                    # Rejeter les noms avec composants abrégés
+                    if any(len(w.rstrip(".")) <= 1 for w in words):
+                        break
+                    return name_candidate, title_candidate
+                break
+
+        # Pas de fallback sur le body: trop de faux positifs.
+        return "", ""
 
     # ==================================================================
     # Détection du site officiel
@@ -474,11 +1054,8 @@ class EmailFinder:
         urls: list[str],
         session: aiohttp.ClientSession,
     ) -> Optional[str]:
-        """Identifie le site officiel de l'entreprise."""
-
         slug = ctx.company_slug
 
-        # 1. Chercher dans les URLs trouvées par les moteurs
         for url in urls:
             parsed = urlparse(url)
             domain = parsed.netloc.lower().replace("www.", "")
@@ -487,12 +1064,10 @@ class EmailFinder:
             if slug in domain_base or domain_base in slug:
                 return f"{parsed.scheme}://{parsed.netloc}"
 
-        # 2. Tenter les domaines courants en parallèle
         candidates: list[str] = []
         for tld in (".fr", ".com", ".eu", ".io", ".net"):
             candidates.append(f"https://www.{slug}{tld}")
 
-        # Variante avec tirets (ex: « Futur Digital » → futur-digital.fr)
         slug_h = ctx.company_slug_hyphen
         if slug_h != slug:
             for tld in (".fr", ".com"):
@@ -512,7 +1087,6 @@ class EmailFinder:
         session: aiohttp.ClientSession,
         url: str,
     ) -> bool:
-        """Tente un HEAD et renvoie True si le site existe (status < 400)."""
         try:
             async with session.head(
                 url,
@@ -533,7 +1107,6 @@ class EmailFinder:
         session: aiohttp.ClientSession,
         url: str,
     ) -> set[str]:
-        """Scrape une page avec contrôle de concurrence."""
         async with sem:
             return await self._scrape_page_async(session, url)
 
@@ -542,9 +1115,6 @@ class EmailFinder:
         session: aiohttp.ClientSession,
         url: str,
     ) -> set[str]:
-        """Télécharge une page (ou la lit depuis le cache) et en extrait les emails."""
-
-        # Vérifier le cache d'abord
         cached = self.cache.get(url)
         if cached is not None:
             return self._extract_emails_from_html(cached)
@@ -558,7 +1128,6 @@ class EmailFinder:
                     if resp.status >= 400:
                         return set()
 
-                    # Lire seulement s'il s'agit de texte/HTML
                     content_type = resp.headers.get("Content-Type", "")
                     if "text" not in content_type and "html" not in content_type:
                         return set()
@@ -582,35 +1151,24 @@ class EmailFinder:
 
     @staticmethod
     def _extract_emails_from_text(text: str) -> set[str]:
-        """Extrait les emails d'un texte brut (snippets, titres…)."""
         emails: set[str] = set()
-
-        # Standard
         for email in _EMAIL_RE.findall(text):
             emails.add(email.lower())
-
-        # Obfusqués : user(at)domain.com, user [at] domain.com
         for m in _OBFUSCATED_RE.finditer(text):
             emails.add(f"{m.group(1)}@{m.group(2)}".lower())
-
         return emails
 
     def _extract_emails_from_html(self, html: str) -> set[str]:
-        """Extrait les emails d'un document HTML complet."""
         emails: set[str] = set()
-
-        # Regex sur le texte brut
         emails.update(self._extract_emails_from_text(html))
-
-        # Liens mailto:
         try:
             soup = BeautifulSoup(html, "html.parser")
             for tag in soup.find_all("a", href=True):
                 href: str = tag["href"]
                 if href.lower().startswith("mailto:"):
                     addr = (
-                        href[7:]        # enlever « mailto: »
-                        .split("?")[0]  # enlever les query params
+                        href[7:]
+                        .split("?")[0]
                         .strip()
                         .lower()
                     )
@@ -618,7 +1176,6 @@ class EmailFinder:
                         emails.add(addr)
         except Exception:
             pass
-
         return emails
 
     # ==================================================================
@@ -627,7 +1184,6 @@ class EmailFinder:
 
     @staticmethod
     def _filter_emails(emails: set[str]) -> list[str]:
-        """Filtre les emails non pertinents."""
         result: list[str] = []
 
         for e in emails:
@@ -637,17 +1193,12 @@ class EmailFinder:
             local, domain = e.rsplit("@", 1)
             domain = domain.lower()
 
-            # Domaines à ignorer
             if domain in _IGNORED_EMAIL_DOMAINS:
                 continue
-
-            # Sous-domaines de domaines ignorés (ex: ingest.sentry.io)
             if any(
                 domain.endswith(f".{ign}") for ign in _IGNORED_EMAIL_DOMAINS
             ):
                 continue
-
-            # Extensions de fichiers (faux positifs CSS / images)
             if re.search(
                 r"\.(png|jpg|jpeg|gif|svg|css|js|woff|woff2|ttf|eot"
                 r"|ico|pdf|zip|mp4|webp|avif)$",
@@ -655,16 +1206,10 @@ class EmailFinder:
                 re.IGNORECASE,
             ):
                 continue
-
-            # Trop court
             if len(local) < 2 or len(domain) < 4:
                 continue
-
-            # Partie locale en hex pur (DSN Sentry, tokens…)
             if len(local) > 16 and re.fullmatch(r"[a-f0-9]+", local):
                 continue
-
-            # Placeholders : votre.nom@, test@, example@…
             if _PLACEHOLDER_LOCAL_RE.match(local):
                 continue
 
