@@ -10,8 +10,13 @@ Fonctionnalités :
 """
 
 import logging
+import os
 import random
+import shutil
+import stat
 import time
+from dataclasses import dataclass
+from pathlib import Path
 from typing import Optional
 
 import config
@@ -41,6 +46,77 @@ def _setup_logger() -> logging.Logger:
     logger.addHandler(ch)
 
     return logger
+
+
+# ------------------------------------------------------------------
+# Nettoyage des artefacts d'exécution
+# ------------------------------------------------------------------
+
+@dataclass(frozen=True)
+class CleanupReport:
+    cache_removed: bool
+    pycache_dirs_removed: int
+    pyc_files_removed: int
+
+
+def _on_rm_error(func, path, exc_info):  # noqa: ANN001
+    """shutil.rmtree onerror handler (Windows-friendly)."""
+    try:
+        os.chmod(path, stat.S_IWRITE)
+    except Exception:
+        pass
+    try:
+        func(path)
+    except Exception:
+        pass
+
+
+def remove_cache_dir(cache_dir: str | Path = "cache") -> bool:
+    p = Path(cache_dir)
+    if not p.exists():
+        return False
+    try:
+        shutil.rmtree(p, onerror=_on_rm_error)
+        return True
+    except Exception:
+        return False
+
+
+def _remove_pycache(root: str | Path = ".") -> tuple[int, int]:
+    base = Path(root)
+    pycache_dirs_removed = 0
+    pyc_files_removed = 0
+    for d in list(base.rglob("__pycache__")):
+        try:
+            shutil.rmtree(d, onerror=_on_rm_error)
+            pycache_dirs_removed += 1
+        except Exception:
+            pass
+    for f in list(base.rglob("*.pyc")):
+        try:
+            f.unlink(missing_ok=True)
+            pyc_files_removed += 1
+        except Exception:
+            pass
+    return pycache_dirs_removed, pyc_files_removed
+
+
+def cleanup_all(
+    *,
+    project_root: str | Path = ".",
+    cache_dir: str | Path = "cache",
+    clean_cache: bool = True,
+    clean_pycache: bool = True,
+) -> CleanupReport:
+    cache_removed = remove_cache_dir(cache_dir) if clean_cache else False
+    pycache_dirs_removed, pyc_files_removed = (
+        _remove_pycache(project_root) if clean_pycache else (0, 0)
+    )
+    return CleanupReport(
+        cache_removed=cache_removed,
+        pycache_dirs_removed=pycache_dirs_removed,
+        pyc_files_removed=pyc_files_removed,
+    )
 
 
 # ------------------------------------------------------------------
@@ -93,6 +169,12 @@ def _find_missing_emails(excel: ExcelHandler, logger: logging.Logger) -> int:
         else:
             score_info = f" (score={result.score})" if result else ""
             logger.warning(f"  [NON TROUVÉ] {company}{score_info} — sera ignoré à l'envoi.")
+
+    # Le cache web n'est utile que pendant cette phase : on le supprime dès la fin.
+    if bool(getattr(config, "CLEANUP_CACHE", True)):
+        removed = remove_cache_dir("cache")
+        if removed:
+            logger.info("Cache web supprimé (dossier cache/).")
 
     if found_count > 0:
         logger.info(f"{found_count} email(s) trouvé(s) au total.")
@@ -221,28 +303,42 @@ def main(dry_run: Optional[bool] = None) -> None:
     Phase 2 : envoi des candidatures
     """
     logger = _setup_logger()
+    try:
+        if dry_run is None:
+            dry_run = bool(getattr(config, "DRY_RUN", False))
 
-    if dry_run is None:
-        dry_run = bool(getattr(config, "DRY_RUN", False))
+        # Charger les données
+        excel = ExcelHandler(EXCEL_FILE)
+        excel.load()
 
-    # Charger les données
-    excel = ExcelHandler(EXCEL_FILE)
-    excel.load()
+        renderer = TemplateRenderer(TEMPLATE_FILE)
+        renderer.load()
 
-    renderer = TemplateRenderer(TEMPLATE_FILE)
-    renderer.load()
+        # Phase 1 — recherche d'emails
+        auto_find = bool(getattr(config, "AUTO_FIND_EMAILS", True))
+        if auto_find:
+            logger.info("=== Phase 1 : Recherche des emails manquants ===")
+            _find_missing_emails(excel, logger)
+        else:
+            logger.info("Recherche automatique désactivée (AUTO_FIND_EMAILS=False).")
 
-    # Phase 1 — recherche d'emails
-    auto_find = bool(getattr(config, "AUTO_FIND_EMAILS", True))
-    if auto_find:
-        logger.info("=== Phase 1 : Recherche des emails manquants ===")
-        _find_missing_emails(excel, logger)
-    else:
-        logger.info("Recherche automatique désactivée (AUTO_FIND_EMAILS=False).")
-
-    # Phase 2 — envoi
-    logger.info("=== Phase 2 : Envoi des candidatures ===")
-    _send_applications(excel, renderer, logger, dry_run)
+        # Phase 2 — envoi
+        logger.info("=== Phase 2 : Envoi des candidatures ===")
+        _send_applications(excel, renderer, logger, dry_run)
+    finally:
+        # Nettoyage best-effort : cache web + fichiers d'exécution Python.
+        report = cleanup_all(
+            project_root=".",
+            cache_dir="cache",
+            clean_cache=bool(getattr(config, "CLEANUP_CACHE", True)),
+            clean_pycache=bool(getattr(config, "CLEANUP_PYCACHE", True)),
+        )
+        logger.info(
+            "Nettoyage terminé: "
+            f"cache_removed={report.cache_removed}, "
+            f"pycache_dirs_removed={report.pycache_dirs_removed}, "
+            f"pyc_files_removed={report.pyc_files_removed}"
+        )
 
 
 if __name__ == "__main__":

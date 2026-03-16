@@ -17,7 +17,8 @@ Architecture :
            ├─ Identification du site officiel (HEAD parallèles)
            ├─ Scraping parallèle (aiohttp + Semaphore + cache)
            ├─ Extraction de noms (HTML context + local part + LinkedIn)
-           └─ Filtrage → scoring (avec name_map) → meilleur email
+           ├─ Filtrage → scoring (avec name_map) → meilleur email
+           └─ Correction ChatGPT (validation / correction via OpenAI)
 """
 
 import asyncio
@@ -35,6 +36,9 @@ from ddgs import DDGS
 
 from email_scorer import ScoredEmail, select_best_email
 from page_cache import PageCache
+
+import config
+from email_corrector import EmailCorrector
 
 logger = logging.getLogger("candidature")
 
@@ -433,14 +437,42 @@ class EmailFinder:
             f" | poste={ctx.job_title[:40] or '?'}"
         )
 
-        return asyncio.run(self._async_find(ctx))
+        best, official_domain = asyncio.run(self._async_find(ctx))
+
+        # ---- Correction ChatGPT (optionnelle) ----
+        if best and getattr(config, "ENABLE_EMAIL_CORRECTION", False):
+            api_key = getattr(config, "OPENAI_API_KEY", "")
+            if api_key and not api_key.startswith("sk-VOTRE"):
+                corrector = EmailCorrector(
+                    api_key=api_key,
+                    model=getattr(config, "OPENAI_MODEL", "gpt-4o-mini"),
+                    prompt_file=getattr(
+                        config, "CORRECTION_PROMPT_FILE", "prompt.txt",
+                    ),
+                )
+                best = corrector.correct_email(
+                    best, company_name, official_domain,
+                )
+            else:
+                logger.warning(
+                    "  Correction ChatGPT activée mais clé API "
+                    "non configurée — étape ignorée"
+                )
+
+        return best
 
     # ==================================================================
     # Cœur asynchrone
     # ==================================================================
 
-    async def _async_find(self, ctx: _SearchContext) -> Optional[ScoredEmail]:
-        """Pipeline complet de recherche (async)."""
+    async def _async_find(
+        self, ctx: _SearchContext,
+    ) -> tuple[Optional[ScoredEmail], str]:
+        """Pipeline complet de recherche (async).
+
+        Returns:
+            (best_email, official_domain)
+        """
 
         connector = aiohttp.TCPConnector(
             limit=self.concurrency,
@@ -568,7 +600,7 @@ class EmailFinder:
                     f"{ctx.company_name}."
                 )
 
-            return best
+            return best, official_domain
 
     # ==================================================================
     # Recherche multi-moteur (DDG + Bing)

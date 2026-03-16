@@ -68,8 +68,6 @@ Bonjour,
 
 Je vous contacte afin de vous proposer ma candidature pour un poste au sein de {company_name}.
 
-Je suis développeur Python et particulièrement intéressé par les projets de votre entreprise.
-
 Je vous remercie pour votre attention.
 
 Cordialement,
