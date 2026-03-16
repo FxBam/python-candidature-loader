@@ -57,9 +57,7 @@ Une ligne est "en attente" si `Date de contact` est vide.
 
 ## Installation
 
-```bash
-pip install pandas openpyxl ddgs requests beautifulsoup4 aiohttp openai
-```
+Tuto en bas
 
 ## Configuration
 
@@ -136,3 +134,132 @@ Liste entreprises stage.xlsx
 ## Licence
 
 Projet open-source libre d'utilisation.
+
+
+
+
+# Installation et Setup
+
+## Prérequis
+
+- Python 3.9 ou supérieur
+- bash (inclus sur macOS / Linux, disponible sur Windows via Git Bash, WSL, ou MSYS2)
+
+## Dépendances
+
+Le script `setup.sh` installe automatiquement :
+
+- `pandas` — manipulation Excel
+- `openpyxl` — support format .xlsx
+- `aiohttp` — requêtes HTTP asynchrones
+- `beautifulsoup4` — parsing HTML
+- `ddgs` — API DuckDuckGo
+- `requests` — requêtes HTTP synchrones
+- `openai` — API OpenAI ChatGPT
+
+**+ toutes les stdlib** : `smtplib`, `email`, `logging`, `asyncio`, `random`, `time`, etc.
+
+## Installation
+
+### Sur macOS / Linux
+
+```bash
+# Rendre le script exécutable
+chmod +x setup.sh
+
+# Lancer le setup
+./setup.sh
+```
+
+### Sur Windows
+
+#### Option 1 : Git Bash / MSYS2 (recommandé)
+
+```bash
+chmod +x setup.sh
+./setup.sh
+```
+
+#### Option 2 : WSL (Windows Subsystem for Linux)
+
+```bash
+chmod +x setup.sh
+./setup.sh
+```
+
+#### Option 3 : PowerShell ou CMD (sans bash)
+
+```powershell
+# Si bash n'est pas disponible, installer manuellemen :
+python -m venv venv
+venv\Scripts\activate
+pip install pandas openpyxl ddgs requests beautifulsoup4 aiohttp openai
+```
+
+## Configuration
+
+1. **Copier le template** :
+   ```bash
+   cp config.example.py config.py
+   ```
+
+2. **Configurer Gmail SMTP** :
+   - Activer la validation en 2 étapes sur votre compte Gmail
+   - Créer un mot de passe d'application (pas le mot de passe du compte)
+   - Remplir `SENDER_EMAIL` et `SENDER_APP_PASSWORD` dans `config.py`
+
+3. **Configurer OpenAI (optionnel)** :
+   - Créer une clé API sur https://platform.openai.com/api-keys
+   - Remplir `OPENAI_API_KEY` dans `config.py`
+
+4. **Préparer le fichier Excel** :
+   - Créer `Liste entreprises stage.xlsx` avec les colonnes :
+     - `Entreprise`, `Lieu`, `Intitulé de poste`, `Contact`, `Nom de la personne`, `Score`, `Date de contact`
+
+## Lancement
+
+```bash
+# Activer le venv
+source venv/bin/activate            # macOS / Linux
+source venv/Scripts/activate        # Windows Git Bash
+venv\Scripts\activate.bat           # Windows CMD/PowerShell
+
+# Lancer le programme
+python main.py
+```
+
+## Désinstallation
+
+```bash
+# Supprimer l'environnement virtuel
+rm -rf venv                # macOS / Linux
+rmdir /s venv              # Windows CMD
+```
+
+## Troubleshooting
+
+### bash n'est pas disponible
+
+- Installez Git Bash (https://git-scm.com/download/win)
+- OU installez WSL (https://docs.microsoft.com/en-us/windows/wsl/install)
+- OU lancez l'installation manuelle (voir section Installation, PowerShell/CMD)
+
+### Python n'est pas trouvé
+
+```bash
+python --version
+python3 --version
+```
+
+Si aucune commande ne marche, installez Python depuis https://www.python.org/
+
+### Erreur lors de l'installation des dépendances
+
+```bash
+# Essayer de mettre à jour pip
+pip install --upgrade pip
+
+# Puis réinstaller
+source venv/bin/activate  # réactiver si nécessaire
+pip install pandas openpyxl ddgs requests beautifulsoup4 aiohttp openai
+```
