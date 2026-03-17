@@ -21,13 +21,36 @@ class ExcelHandler:
     COL_POSTE = "Intitulé de poste"
     COL_DATE_CONTACT = "Date de contact"
 
+    # Colonnes obligatoires
+    REQUIRED_COLS = ["Entreprise", "Contact"]
+
     def __init__(self, filepath: str) -> None:
         self.filepath = filepath
         self.df: pd.DataFrame = pd.DataFrame()
 
     def load(self) -> None:
-        """Charge le fichier Excel en mémoire."""
+        """Charge le fichier Excel en mémoire et vérifie les colonnes obligatoires."""
         self.df = pd.read_excel(self.filepath)
+
+        # Vérifier les colonnes obligatoires
+        missing = [col for col in self.REQUIRED_COLS if col not in self.df.columns]
+        if missing:
+            raise ValueError(
+                f"Il manque des colonnes obligatoires dans le fichier Excel : {', '.join(missing)}"
+            )
+
+        # Créer les colonnes optionnelles manquantes
+        optional_cols = [
+            self.COL_LIEU,
+            self.COL_NOM_PERSONNE,
+            self.COL_SCORE,
+            self.COL_POSTE,
+            self.COL_DATE_CONTACT,
+        ]
+        for col in optional_cols:
+            if col not in self.df.columns:
+                self.df[col] = pd.NA
+
         # Convertir en object pour pouvoir y écrire des strings même si tout est NaN
         for col in (self.COL_DATE_CONTACT, self.COL_CONTACT,
                      self.COL_NOM_PERSONNE, self.COL_SCORE):
@@ -102,6 +125,13 @@ class ExcelHandler:
     def get_contact_email(self, row: pd.Series) -> str:
         """Extrait l'email de contact d'une ligne."""
         return str(row[self.COL_CONTACT])
+
+    def get_contact_name(self, row: pd.Series) -> str:
+        """Extrait le nom de la personne de contact (vide si NaN)."""
+        val = row[self.COL_NOM_PERSONNE]
+        if pd.isna(val):
+            return ""
+        return str(val).strip()
 
     def get_location(self, row: pd.Series) -> str:
         """Extrait le lieu d'une ligne (vide si NaN)."""

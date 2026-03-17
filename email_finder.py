@@ -441,10 +441,14 @@ class EmailFinder:
 
         # ---- Correction ChatGPT (optionnelle) ----
         if best and getattr(config, "ENABLE_EMAIL_CORRECTION", False):
-            api_key = getattr(config, "OPENAI_API_KEY", "")
-            if api_key and not api_key.startswith("sk-VOTRE"):
+            # Vérifier qu'au moins une clé API est configurée
+            has_key = (
+                (hasattr(config, "OPENAI_API_KEY1") and config.OPENAI_API_KEY1)
+                or (hasattr(config, "OPENAI_API_KEY2") and config.OPENAI_API_KEY2)
+                or (hasattr(config, "OPENAI_API_KEY") and config.OPENAI_API_KEY)
+            )
+            if has_key:
                 corrector = EmailCorrector(
-                    api_key=api_key,
                     model=getattr(config, "OPENAI_MODEL", "gpt-4o-mini"),
                     prompt_file=getattr(
                         config, "CORRECTION_PROMPT_FILE", "prompt.txt",

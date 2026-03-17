@@ -74,6 +74,12 @@ OPENAI_MODEL = "gpt-4o-mini"
 # Fichier contenant le prompt de correction
 CORRECTION_PROMPT_FILE = "prompt.txt"
 
+# --- Formatage du texte (salutation + préposition entreprise) ---
+# Utilise OpenAI pour :
+# - Déterminer "Madame," ou "Monsieur," selon le prénom du contact
+# - Accorder "de/d'/de l'" devant le nom d'entreprise
+ENABLE_TEXT_FORMATTING = True
+
 # --- Pièces jointes ---
 # Chemins vers les fichiers à joindre à chaque email (laisser vide pour ne pas joindre)
 CV_PATH = r""           # ex: r"C:/Users/moi/Documents/cv.pdf"

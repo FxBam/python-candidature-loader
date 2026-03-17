@@ -24,6 +24,7 @@ from email_finder import EmailFinder
 from email_sender import EmailSender
 from excel_handler import ExcelHandler
 from template_renderer import TemplateRenderer
+from text_formatter import format_company_with_preposition, get_salutation
 
 EXCEL_FILE = "Liste entreprises stage.xlsx"
 TEMPLATE_FILE = "message.txt"
@@ -267,8 +268,18 @@ def _send_applications(
         for idx, row in ready.iterrows():
             company = excel.get_company_name(row)
             email = excel.get_contact_email(row)
+            contact_name = excel.get_contact_name(row)
 
-            body = renderer.render(company)
+            # Formatage via OpenAI (si activé)
+            if bool(getattr(config, "ENABLE_TEXT_FORMATTING", True)):
+                salutation = get_salutation(contact_name)
+                company_de = format_company_with_preposition(company)
+                logger.info(f"  Formatage : {salutation} / {company_de}")
+            else:
+                salutation = "Madame, Monsieur,"
+                company_de = f"de {company}"
+
+            body = renderer.render(company, salutation, company_de)
             subject = TemplateRenderer.render_subject(config.EMAIL_SUBJECT, company)
 
             success = False
@@ -352,7 +363,12 @@ def main(dry_run: Optional[bool] = None) -> None:
 
         # Charger les données
         excel = ExcelHandler(EXCEL_FILE)
-        excel.load()
+        try:
+            excel.load()
+        except ValueError as e:
+            logger.error(str(e))
+            print(f"\n❌ ERREUR : {e}\n")
+            return
 
         renderer = TemplateRenderer(TEMPLATE_FILE)
         renderer.load()
