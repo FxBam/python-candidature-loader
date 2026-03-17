@@ -1,8 +1,12 @@
 """Envoi d'emails via SMTP."""
 
+import mimetypes
 import smtplib
+from email.mime.base import MIMEBase
+from email import encoders
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
+from pathlib import Path
 
 
 class EmailSender:
@@ -28,8 +32,14 @@ class EmailSender:
             self._smtp.quit()
             self._smtp = None
 
-    def send(self, to_email: str, subject: str, body: str) -> None:
-        """Envoie un email en texte brut."""
+    def send(
+        self,
+        to_email: str,
+        subject: str,
+        body: str,
+        attachments: list[Path] | None = None,
+    ) -> None:
+        """Envoie un email en texte brut avec pièces jointes optionnelles."""
         if self._smtp is None:
             raise RuntimeError("SMTP non connecté. Appelez connect() d'abord.")
 
@@ -38,6 +48,17 @@ class EmailSender:
         msg["To"] = to_email
         msg["Subject"] = subject
         msg.attach(MIMEText(body, "plain", "utf-8"))
+
+        for path in (attachments or []):
+            mime_type, _ = mimetypes.guess_type(str(path))
+            maintype, subtype = (mime_type or "application/octet-stream").split("/", 1)
+            with open(path, "rb") as f:
+                part = MIMEBase(maintype, subtype)
+                part.set_payload(f.read())
+            encoders.encode_base64(part)
+            part.add_header("Content-Disposition", "attachment", filename=path.name)
+            msg.attach(part)
+
         self._smtp.sendmail(self.email, to_email, msg.as_string())
 
     def __enter__(self) -> "EmailSender":

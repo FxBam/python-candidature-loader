@@ -1,8 +1,12 @@
 """Gestion du fichier Excel des entreprises."""
 
+import re
 from datetime import datetime
 
 import pandas as pd
+
+_EMAIL_RE = re.compile(r"[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}")
+_EMAIL_EXACT_RE = re.compile(r"^[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}$")
 
 
 class ExcelHandler:
@@ -35,8 +39,9 @@ class ExcelHandler:
         self.df.to_excel(self.filepath, index=False)
 
     def get_pending(self) -> pd.DataFrame:
-        """Renvoie les lignes dont la date de contact est vide (non envoyées)."""
-        return self.df[self.df[self.COL_DATE_CONTACT].isna()]
+        """Renvoie les lignes dont la date de contact est vide ou non renseignée."""
+        col = self.df[self.COL_DATE_CONTACT]
+        return self.df[col.isna() | (col.astype(str).str.strip() == "")]
 
     def get_missing_emails(self) -> pd.DataFrame:
         """Renvoie les lignes sans email de contact (NaN ou vide)."""
@@ -62,21 +67,33 @@ class ExcelHandler:
         self.df.at[index, self.COL_SCORE] = score
 
     def mark_sent(self, index: int) -> None:
-        """Marque une ligne comme envoyée avec la date/heure actuelle."""
-        self.df.at[index, self.COL_DATE_CONTACT] = datetime.now().strftime(
-            "%Y-%m-%d %H:%M:%S"
-        )
+        """Marque une ligne comme envoyée avec la date du jour."""
+        self.df.at[index, self.COL_DATE_CONTACT] = datetime.now().strftime("%Y-%m-%d")
 
     # ------------------------------------------------------------------
     # Lecture
     # ------------------------------------------------------------------
 
-    def has_email(self, row: pd.Series) -> bool:
-        """Vérifie si la ligne a un email de contact renseigné."""
-        val = row[self.COL_CONTACT]
+    def has_company_name(self, row: pd.Series) -> bool:
+        """Retourne True uniquement si la case Entreprise est renseignée."""
+        val = row[self.COL_ENTREPRISE]
         if pd.isna(val):
             return False
         return str(val).strip() != ""
+
+    def count_emails(self, row: pd.Series) -> int:
+        """Retourne le nombre d'adresses email trouvées dans la case Contact."""
+        val = row[self.COL_CONTACT]
+        if pd.isna(val):
+            return 0
+        return len(_EMAIL_RE.findall(str(val)))
+
+    def has_email(self, row: pd.Series) -> bool:
+        """Retourne True uniquement si la case Contact est exactement un email (rien d'autre)."""
+        val = row[self.COL_CONTACT]
+        if pd.isna(val):
+            return False
+        return bool(_EMAIL_EXACT_RE.match(str(val).strip()))
 
     def get_company_name(self, row: pd.Series) -> str:
         """Extrait le nom de l'entreprise d'une ligne."""

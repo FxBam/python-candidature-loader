@@ -182,6 +182,25 @@ def _find_missing_emails(excel: ExcelHandler, logger: logging.Logger) -> int:
     return found_count
 
 
+def _resolve_attachments(logger: logging.Logger) -> list[Path]:
+    """Résout et valide les chemins CV et LM depuis config.
+
+    Retourne la liste des Path valides. Log un warning pour chaque fichier absent.
+    """
+    attachments: list[Path] = []
+    for label, attr in (("CV", "CV_PATH"), ("Lettre de motivation", "LM_PATH")):
+        raw = getattr(config, attr, "").strip()
+        if not raw:
+            continue
+        p = Path(raw)
+        if p.is_file():
+            attachments.append(p)
+            logger.info(f"  Pièce jointe [{label}] : {p.name}")
+        else:
+            logger.warning(f"  Pièce jointe [{label}] introuvable, ignorée : {p}")
+    return attachments
+
+
 # ------------------------------------------------------------------
 # Phase 2 : envoi des candidatures
 # ------------------------------------------------------------------
@@ -191,22 +210,45 @@ def _send_applications(
     renderer: TemplateRenderer,
     logger: logging.Logger,
     dry_run: bool,
+    attachments: list[Path] | None = None,
 ) -> None:
     """Envoie les candidatures pour toutes les lignes prêtes."""
 
     # Re-filtrer les pending (certains ont peut-être un email maintenant)
     pending = excel.get_pending()
 
-    # Ne garder que celles qui ont un email
-    ready = pending[pending.index.map(lambda i: excel.has_email(excel.df.loc[i]))]
+    # Classifier chaque ligne : entreprise vide / aucun email / texte parasite / plusieurs emails / ok
+    no_company  = [i for i in pending.index if not excel.has_company_name(excel.df.loc[i])]
+    no_email    = [i for i in pending.index if excel.has_company_name(excel.df.loc[i]) and excel.count_emails(excel.df.loc[i]) == 0]
+    dirty_email = [i for i in pending.index
+                   if excel.has_company_name(excel.df.loc[i])
+                   and excel.count_emails(excel.df.loc[i]) == 1
+                   and not excel.has_email(excel.df.loc[i])]
+    multi_email = [i for i in pending.index if excel.has_company_name(excel.df.loc[i]) and excel.count_emails(excel.df.loc[i]) > 1]
+    ready = pending[pending.index.map(
+        lambda i: excel.has_company_name(excel.df.loc[i]) and excel.has_email(excel.df.loc[i])
+    )]
+
+    if no_company:
+        logger.warning(f"{len(no_company)} ligne(s) ignorée(s) : case Entreprise vide.")
+    if no_email:
+        logger.warning(f"{len(no_email)} entreprise(s) ignorée(s) : aucun email de contact.")
+    for i in dirty_email:
+        company = excel.get_company_name(excel.df.loc[i])
+        logger.warning(
+            f"  [IGNORÉ] {company} — email accompagné de texte parasite "
+            f"(à nettoyer manuellement) : {excel.get_contact_email(excel.df.loc[i])!r}"
+        )
+    for i in multi_email:
+        company = excel.get_company_name(excel.df.loc[i])
+        logger.warning(
+            f"  [IGNORÉ] {company} — plusieurs emails dans la case Contact "
+            f"(à corriger manuellement) : {excel.get_contact_email(excel.df.loc[i])!r}"
+        )
 
     if ready.empty:
         logger.info("Aucune candidature prête à envoyer (emails manquants ou déjà envoyées).")
         return
-
-    skipped = len(pending) - len(ready)
-    if skipped > 0:
-        logger.warning(f"{skipped} entreprise(s) ignorée(s) car sans email de contact.")
 
     logger.info(f"{len(ready)} candidature(s) à envoyer.")
 
@@ -233,9 +275,10 @@ def _send_applications(
             for attempt in range(1, config.MAX_RETRIES + 1):
                 try:
                     if dry_run:
-                        logger.info(f"[DRY RUN] Envoi simulé -> {company} <{email}>")
+                        aj = f" + {len(attachments)} pj" if attachments else ""
+                        logger.info(f"[DRY RUN] Envoi simulé -> {company} <{email}>{aj}")
                     else:
-                        sender.send(email, subject, body)
+                        sender.send(email, subject, body, attachments or [])
 
                     excel.mark_sent(idx)
                     excel.save()
@@ -322,9 +365,15 @@ def main(dry_run: Optional[bool] = None) -> None:
         else:
             logger.info("Recherche automatique désactivée (AUTO_FIND_EMAILS=False).")
 
+        # Phase 1.5 — résolution des pièces jointes
+        logger.info("=== Pièces jointes ===")
+        attachments = _resolve_attachments(logger)
+        if not attachments:
+            logger.info("  Aucune pièce jointe configurée (CV_PATH / LM_PATH vides).")
+
         # Phase 2 — envoi
         logger.info("=== Phase 2 : Envoi des candidatures ===")
-        _send_applications(excel, renderer, logger, dry_run)
+        _send_applications(excel, renderer, logger, dry_run, attachments)
     finally:
         # Nettoyage best-effort : cache web + fichiers d'exécution Python.
         report = cleanup_all(

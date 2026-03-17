@@ -73,3 +73,8 @@ OPENAI_MODEL = "gpt-4o-mini"
 
 # Fichier contenant le prompt de correction
 CORRECTION_PROMPT_FILE = "prompt.txt"
+
+# --- Pièces jointes ---
+# Chemins vers les fichiers à joindre à chaque email (laisser vide pour ne pas joindre)
+CV_PATH = r""           # ex: r"C:/Users/moi/Documents/cv.pdf"
+LM_PATH = r""           # ex: r"C:/Users/moi/Documents/lettre_de_motivation.pdf"
