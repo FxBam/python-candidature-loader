@@ -135,8 +135,18 @@ Liste entreprises stage.xlsx
 
 Projet open-source libre d'utilisation.
 
+## Mises à jour récentes
 
+- **Nouvelles fonctionnalités :**
+   - Pièces jointes : support des CV et lettres de motivation via `CV_PATH` et `LM_PATH` dans `config.py`.
+   - Formatage localisé du texte : salutations et prépositions d'entreprise via `text_formatter.py` (`get_salutation`, `format_company_with_preposition`).
+   - Correction IA renforcée : prise en charge de plusieurs clés API et fallback OpenAI ↔ Google Gemini (voir `OPENAI_API_KEY1`, `OPENAI_API_KEY2`, `OPENAI_API_KEY3`, `OPENAI_MODEL_FALLBACKS`).
+   - Dépendances mises à jour : `google-generativeai` est listé dans `requirements.txt` pour le support Gemini.
 
+- **Éléments dépréciés / retirés :**
+   - `temp_corrector.py` est présent dans le dépôt comme prototype expérimental et **n'est pas utilisé** par le flow principal (le correcteur actif est `email_corrector.py`). Vous pouvez le supprimer si vous ne l'utilisez pas.
+
+Si vous voulez que je fusionne ces informations directement dans les sections existantes (Configuration / Fonctionnalités), dites-le et je réécrirai les paragraphes concernés.
 
 # Installation et Setup
 
