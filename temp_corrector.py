@@ -3,82 +3,47 @@
 import logging
 import re
 from typing import Optional
-
 from openai import OpenAI
-
 import config
 from email_scorer import ScoredEmail
 
 logger = logging.getLogger("candidature")
-
 _EMAIL_RE = re.compile(r"[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}")
 
-
 def _get_api_keys() -> list[tuple[str, str]]:
-    """Retourne la liste des clés API disponibles avec leur type.
-
-    Returns:
-        Liste de tuples (api_key, api_type) où api_type est "openai" ou "google".
-    """
     keys: list[tuple[str, str]] = []
-
-    # Clés OpenAI standard
     if hasattr(config, "OPENAI_API_KEY1") and config.OPENAI_API_KEY1:
         keys.append((config.OPENAI_API_KEY1, "openai"))
     if hasattr(config, "OPENAI_API_KEY2") and config.OPENAI_API_KEY2:
         keys.append((config.OPENAI_API_KEY2, "openai"))
-
-    # Clé Google AI Studio (détection automatique par préfixe "AIza")
     if hasattr(config, "OPENAI_API_KEY3") and config.OPENAI_API_KEY3:
         key3 = config.OPENAI_API_KEY3
         if key3.startswith("AIza"):
             keys.append((key3, "google"))
         else:
             keys.append((key3, "openai"))
-
-    # Fallback sur l'ancienne variable si les nouvelles n'existent pas
     if not keys and hasattr(config, "OPENAI_API_KEY") and config.OPENAI_API_KEY:
         keys.append((config.OPENAI_API_KEY, "openai"))
-
     return keys
 
-
 def _call_google_api(api_key: str, prompt: str, max_tokens: int = 100) -> str | None:
-    """Appelle l'API Google Gemini."""
     try:
         import warnings
         with warnings.catch_warnings():
             warnings.simplefilter("ignore", category=FutureWarning)
             import google.generativeai as genai
-
         genai.configure(api_key=api_key)
-
-        # Utiliser gemini-2.0-flash (version stable disponible)
         model = genai.GenerativeModel('gemini-2.0-flash')
-
         response = model.generate_content(
             prompt,
-            generation_config=genai.types.GenerationConfig(
-                max_output_tokens=max_tokens,
-                temperature=0,
-            )
+            generation_config=genai.types.GenerationConfig(max_output_tokens=max_tokens, temperature=0,)
         )
-
         return response.text.strip()
-    except ImportError:
-        return None
     except Exception:
         return None
 
-
 class EmailCorrector:
-    """Corrige / valide un email trouvé automatiquement via ChatGPT/Gemini."""
-
-    def __init__(
-        self,
-        model: str = "gpt-4o-mini",
-        prompt_file: str = "prompt.txt",
-    ) -> None:
+    def __init__(self, model: str = "gpt-4o-mini", prompt_file: str = "prompt.txt") -> None:
         self.model = model
         self._prompt_template = self._load_prompt(prompt_file)
         self._api_keys = _get_api_keys()
@@ -89,20 +54,17 @@ class EmailCorrector:
             with open(path, encoding="utf-8") as f:
                 return f.read()
         except FileNotFoundError:
-            return "Vérifie cet email: {email} pour l'entreprise {company} ({domain}). Score: {score}. Personne: {person_name}. Renvoie uniquement l'adresse corrigée complète sans texte supplémentaire."
+            return "Email: {email}, Company: {company}, Domain: {domain}, Person: {person_name}. Renvoie uniquement l'adresse corrigée complète sans aucun autre texte."
 
     def _call_with_fallback(self, prompt: str) -> str | None:
-        """Appelle l'API avec fallback sur les clés de secours."""
         for i, (key, api_type) in enumerate(self._api_keys):
             try:
                 if api_type == "google":
                     result = _call_google_api(key, prompt, max_tokens=100)
                     if result:
                         return result
-                    # Si échec, continuer avec la clé suivante
-                    raise Exception("Google API a retourné un résultat vide")
+                    raise Exception("Empty")
                 else:
-                    # OpenAI
                     client = OpenAI(api_key=key)
                     response = client.chat.completions.create(
                         model=self.model,
@@ -113,42 +75,23 @@ class EmailCorrector:
                     return response.choices[0].message.content.strip()
             except Exception:
                 continue
-
         return None
 
-    def correct_email(
-        self,
-        scored: ScoredEmail,
-        company_name: str,
-        official_domain: str = "",
-    ) -> ScoredEmail:
-        """Demande à l'IA de vérifier / corriger l'email."""
+    def correct_email(self, scored: ScoredEmail, company_name: str, official_domain: str = "") -> ScoredEmail:
         prompt = self._prompt_template.format(
-            email=scored.email,
-            company=company_name,
-            domain=official_domain or "(inconnu)",
-            score=scored.score,
-            person_name=scored.person_name or "(inconnu)",
+            email=scored.email, company=company_name, domain=official_domain or "(inconnu)",
+            score=scored.score, person_name=scored.person_name or "(inconnu)",
         )
-
         raw = self._call_with_fallback(prompt)
-
         if raw is None:
             return scored
-
         match = _EMAIL_RE.search(raw)
-
         if not match:
             return scored
-
         corrected = match.group(0).lower()
-
         if corrected == scored.email.lower():
-            logger.info(f"  IA: email confirmé → {scored.email}")
             return scored
-
         old_email = scored.email
         scored.email = corrected
         scored.reasons.append(f"IA: corrigé de {old_email} → {corrected}")
-        logger.info(f"  IA: email corrigé {old_email} → {corrected}")
         return scored

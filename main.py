@@ -270,14 +270,10 @@ def _send_applications(
             email = excel.get_contact_email(row)
             contact_name = excel.get_contact_name(row)
 
-            # Formatage via OpenAI (si activé)
-            if bool(getattr(config, "ENABLE_TEXT_FORMATTING", True)):
-                salutation = get_salutation(contact_name)
-                company_de = format_company_with_preposition(company)
-                logger.info(f"  Formatage : {salutation} / {company_de}")
-            else:
-                salutation = "Madame, Monsieur,"
-                company_de = f"de {company}"
+            # Formatage local (prénom et nom d'entreprise)
+            salutation = get_salutation(contact_name)
+            company_de = format_company_with_preposition(company)
+            logger.info(f"  Formatage : {salutation} / {company_de}")
 
             body = renderer.render(company, salutation, company_de)
             subject = TemplateRenderer.render_subject(config.EMAIL_SUBJECT, company)

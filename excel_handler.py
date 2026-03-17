@@ -16,7 +16,7 @@ class ExcelHandler:
     COL_ENTREPRISE = "Entreprise"
     COL_LIEU = "Lieu"
     COL_CONTACT = "Contact"
-    COL_NOM_PERSONNE = "Nom de la personne "  # espace trailing dans le xlsx
+    COL_NOM_PERSONNE = "Nom du contact"
     COL_SCORE = "Score"
     COL_POSTE = "Intitulé de poste"
     COL_DATE_CONTACT = "Date de contact"

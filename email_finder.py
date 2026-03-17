@@ -445,6 +445,7 @@ class EmailFinder:
             has_key = (
                 (hasattr(config, "OPENAI_API_KEY1") and config.OPENAI_API_KEY1)
                 or (hasattr(config, "OPENAI_API_KEY2") and config.OPENAI_API_KEY2)
+                or (hasattr(config, "OPENAI_API_KEY3") and config.OPENAI_API_KEY3)
                 or (hasattr(config, "OPENAI_API_KEY") and config.OPENAI_API_KEY)
             )
             if has_key:
